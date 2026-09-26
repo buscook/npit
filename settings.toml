@@ -1,0 +1,57 @@
+[appearance]
+preset = "default"
+scroll_speed = 3.0
+terminal_font = ""
+terminal_font_size = 0
+
+[visualizer]
+enabled = true
+# Also controls the frame rate of scrolling titles, album and playlist names, and next-track text.
+fps = 200
+bars = 32
+sensitivity = 175
+dim_unplayed = true
+
+[layout]
+minimal = false
+
+[display]
+album = true
+track_number = true
+playback_time = true
+status = true
+volume = true
+next_track = true
+source = true
+playlist = true
+
+[behavior]
+metadata_interval = 0.5
+spotify_interval = 1.0
+player = ""
+
+[lyrics]
+enabled = true
+smooth_scroll = false
+transition_fps = 20
+transition_duration = 0.3
+lines = 3
+offset = 0.0
+
+[clean]
+enabled = false
+extra_words = []
+
+[performance]
+safe_render = false
+paused_fps = 5
+
+[artwork]
+mode = "color"
+characters = " .,:;irsXA253hMHGS#9B&@"
+
+[colors]
+theme = "cover"
+
+[controls]
+enabled = false

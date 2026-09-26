@@ -1,0 +1,7 @@
+npit
+*.o
+*.log
+.env
+
+.DS_Store
+Thumbs.db

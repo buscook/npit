@@ -53,8 +53,6 @@ While NPIT is running, drag an audio file, video file, or folder onto its termin
 
 Player metadata loads in the background, and failed folder drops leave the current song playing. Change `[behavior].metadata_interval` in the settings file to adjust the backup refresh rate.
 
-To run the playback and resize tests from the project folder, use `make test` (Python 3 is needed only for the tests).
-
 Spotify queue and playlist information are optional. To enable them, create a Spotify Developer app with redirect URI `http://127.0.0.1:8888/callback` and set `SPOTIPY_CLIENT_ID` to its client ID before starting NPIT.
 
 ## License

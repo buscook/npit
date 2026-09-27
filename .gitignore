@@ -4,6 +4,7 @@ npit
 .env
 __pycache__/
 *.py[cod]
+/tests/
 
 .DS_Store
 Thumbs.db

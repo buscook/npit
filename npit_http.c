@@ -80,4 +80,3 @@ Buffer http_get(const char *url, const char *authorization) {
     curl_slist_free_all(headers);
     return buffer;
 }
-

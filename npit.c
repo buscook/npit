@@ -17,6 +17,8 @@ int cava_values[128];
 static char cava_frame[16384];
 static size_t cava_frame_length;
 char next_track[MAX_FIELD] = "";
+char ui_notice[MAX_FIELD];
+double ui_notice_until;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 bool queue_pending;
 bool queue_requested;
@@ -34,6 +36,11 @@ bool lyrics_loaded;
 static char config_path[1024];
 int cover_r = 0, cover_g = 220, cover_b = 190;
 atomic_bool force_redraw = true;
+
+void show_notice(const char *message) {
+    set_string(ui_notice, sizeof(ui_notice), message);
+    ui_notice_until = monotonic_seconds() + 6.0;
+}
 int previous_rows, previous_cols;
 DetailRow *detail_rows;
 int detail_row_count;
@@ -129,6 +136,7 @@ static void cleanup(void) {
     while (active_workers) pthread_cond_wait(&worker_condition, &worker_mutex);
     pthread_mutex_unlock(&worker_mutex);
     stop_player_follow();
+    local_close();
     reset_detail_rows();
     reset_wrapped_lyrics();
     if (cava_pid > 0) {
@@ -418,6 +426,8 @@ static void handle_keypress(char key, const Song *song) {
     else if (key == 'r' || key == 'R') player_command(song, "loop", "toggle");
     else if (key == '+' || key == '=') player_command(song, "volume", "up");
     else if (key == '-') player_command(song, "volume", "down");
+    else if (key == '[') player_command(song, "seek", "back");
+    else if (key == ']') player_command(song, "seek", "forward");
 }
 
 static void start_cava(void) {
@@ -481,12 +491,49 @@ static bool update_cava(void) {
 }
 
 static void usage(void) {
-    puts("npit - now playing in terminal\n\nusage: npit [options]\n\n  -h, --help                 show this help\n      --version              show version\n      --config PATH          use a settings file\n      --print-config-path    show settings location\n      --diagnose             show runtime dependency status\n      --profile              print timing summary after exit\n      --player NAME          choose an MPRIS player\n      --theme NAME           cover, cyan, green, amber, purple, monochrome, rainbow\n      --art-mode MODE        color, monochrome, blocks, none\n      --preset NAME          default, compact, cinema, minimal\n      --fps NUMBER           visualizer and text scroll FPS, 10-360; 0 detects monitor rate\n      --bars NUMBER          CAVA bar count\n      --sensitivity NUMBER   CAVA input sensitivity\n      --spotify-interval SEC Spotify queue refresh interval\n      --no-visualizer        disable CAVA spectrum\n      --lyrics               enable lyrics\n      --no-lyrics            disable lyrics\n      --clean                censor explicit words\n      --no-clean             show unfiltered text\n      --minimal              show title, artist, spectrum, and time\n      --safe-render          limit redraws for slower terminals\n\nwhen [controls].enabled is true: space=play/pause, arrows=skip, +/-=volume, s=shuffle, r=repeat, l=lyrics, k=clean. q and ctrl+c always quit.");
+    puts("npit - now playing in terminal\n\nusage: npit [options] [FOLDER]\n\nFOLDER plays audio and video files in the order returned by the folder. Track numbers reflect that order. Video appears as moving ASCII.\n\n  -h, --help                 show this help\n      --version              show version\n      --config PATH          use a settings file\n      --print-config-path    show settings location\n      --diagnose             show runtime dependency status\n      --profile              print timing summary after exit\n      --player NAME          choose an MPRIS player\n      --theme NAME           cover, cyan, green, amber, purple, monochrome, rainbow\n      --art-mode MODE        color, monochrome, blocks, none\n      --preset NAME          default, compact, cinema, minimal\n      --fps NUMBER           visualizer and text scroll FPS, 10-360; 0 detects monitor rate\n      --bars NUMBER          CAVA bar count\n      --sensitivity NUMBER   CAVA input sensitivity\n      --spotify-interval SEC Spotify queue refresh interval\n      --no-visualizer        disable CAVA spectrum\n      --lyrics               enable lyrics\n      --no-lyrics            disable lyrics\n      --clean                censor explicit words\n      --no-clean             show unfiltered text\n      --minimal              show title, artist, spectrum, and time\n      --safe-render          limit redraws for slower terminals\n\nwhen [controls].enabled is true: space=play/pause, arrows=skip, [ and ]=seek 5 seconds, +/-=volume, s=shuffle, r=repeat, l=lyrics, k=clean. q and ctrl+c always quit.");
+}
+
+static bool dropped_path(const char *input, char *path, size_t size) {
+    while (isspace((unsigned char)*input)) input++;
+    size_t length = strlen(input);
+    while (length && isspace((unsigned char)input[length - 1])) length--;
+    if (length > 1 && (input[0] == '\'' || input[0] == '"') && input[length - 1] == input[0]) { input++; length -= 2; }
+    char raw[8192];
+    if (length >= sizeof(raw)) return false;
+    memcpy(raw, input, length);
+    raw[length] = 0;
+    if (!strncmp(raw, "file://", 7)) {
+        char *decoded = g_filename_from_uri(raw, NULL, NULL);
+        if (!decoded) return false;
+        set_string(path, size, decoded);
+        g_free(decoded);
+        return true;
+    }
+    size_t output = 0;
+    for (size_t i = 0; i < length && output + 1 < size; i++) {
+        if (raw[i] == '\\' && i + 1 < length) i++;
+        path[output++] = raw[i];
+    }
+    path[output] = 0;
+    if (path[0] == '~' && path[1] == '/') {
+        const char *home = getenv("HOME");
+        char expanded[8192];
+        size_t home_length = home ? strlen(home) : 0;
+        size_t suffix_length = strlen(path + 1);
+        if (home && home_length + suffix_length < sizeof(expanded)) {
+            memcpy(expanded, home, home_length);
+            memcpy(expanded + home_length, path + 1, suffix_length + 1);
+            set_string(path, size, expanded);
+        }
+    }
+    return path[0] != 0;
 }
 
 int main(int argc, char **argv) {
     defaults();
     const char *custom_config = NULL;
+    const char *media_folder = NULL;
     const char *cli_player = NULL, *cli_theme = NULL, *cli_art_mode = NULL, *cli_preset = NULL;
     int cli_fps = -1, cli_lyrics = -1, cli_bars = -1, cli_sensitivity = -1;
     double cli_spotify_interval = -1;
@@ -514,7 +561,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-clean")) cli_no_clean = true;
         else if (!strcmp(argv[i], "--minimal")) cli_minimal = true;
         else if (!strcmp(argv[i], "--safe-render")) cli_safe = true;
-        else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
+        else if (argv[i][0] != '-' && !media_folder) media_folder = argv[i];
+        else { fprintf(stderr, "unknown option or extra folder: %s\n", argv[i]); return 2; }
     }
     if (show_help) { usage(); return 0; }
     load_config(custom_config);
@@ -551,6 +599,10 @@ int main(int argc, char **argv) {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) { fputs("npit requires an interactive terminal\n", stderr); return 1; }
     curl_global_init(CURL_GLOBAL_DEFAULT);
     setlocale(LC_ALL, "");
+    if (media_folder) {
+        char error[512];
+        if (!local_open_folder(media_folder, error, sizeof(error))) { fprintf(stderr, "npit: %s\n", error); return 1; }
+    }
     mpris_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
     detect_terminal_font();
     atexit(report_timings);
@@ -568,26 +620,31 @@ int main(int argc, char **argv) {
     lyric_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     start_cava();
     Song song = {0};
-    get_song(&song);
+    if (!local_is_active()) start_player_follow();
+    if (local_is_active()) local_get_song(&song); else get_song(&song);
     request_artwork(song.art_url);
-    start_player_follow();
-    double next_metadata = monotonic_seconds() + (player_follow_fd >= 0 ? fmax(3.0, cfg.metadata_interval) : cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5);
+    double next_metadata = monotonic_seconds() + 0.1;
     double next_queue = 0;
     double sync_position = song.position;
     double sync_time = monotonic_seconds();
     if (song.player[0]) request_lyrics(&song);
     char key;
+    char pasted_input[8192] = {0};
+    size_t pasted_length = 0;
+    double pasted_at = 0.0;
     double last_render_at = -INFINITY;
     while (running) {
         double now = monotonic_seconds();
         bool playing = !strcasecmp(song.status, "playing");
         int target_fps = playing ? 10 : cfg.paused_fps;
+        if (playing && local_has_video() && target_fps < 30) target_fps = 30;
         if (target_fps < 1) target_fps = 1;
         if ((title_marquee.active || album_marquee.active || playlist_marquee.active || next_marquee.active) && target_fps < cfg.fps) target_fps = cfg.fps;
         if (cfg.smooth_scroll && now - lyric_transition_start < cfg.transition_duration && cfg.transition_fps > target_fps) target_fps = cfg.transition_fps;
         double wait_seconds = last_render_at + 1.0 / target_fps - now;
         if (wait_seconds < 0.0) wait_seconds = 0.0;
         if (next_metadata - now < wait_seconds) wait_seconds = fmax(0.0, next_metadata - now);
+        if (pasted_length && pasted_at + 0.2 - now < wait_seconds) wait_seconds = fmax(0.0, pasted_at + 0.2 - now);
         if (cfg.show_next && song.player[0] && strstr(song.player, "spotify") && next_queue - now < wait_seconds) wait_seconds = fmax(0.0, next_queue - now);
         if (playing && cfg.lyrics && !cfg.minimal) {
             double position = sync_position + now - sync_time + cfg.lyric_offset;
@@ -607,7 +664,15 @@ int main(int argc, char **argv) {
         bool playback_changed = player_follow_fd >= 0 && (inputs[1].revents & (POLLIN | POLLHUP | POLLERR)) && read_player_follow(now);
         if (inputs[0].revents & POLLIN) {
             if (read(STDIN_FILENO, &key, 1) == 1) {
-                if (key == 27) {
+                if (pasted_length || key == '/' || key == '~' || key == '.' || key == '\'' || key == '"' || key == 'f') {
+                    if (key == '\r' || key == '\n') pasted_at = 0;
+                    else if (key == 127 || key == '\b') { if (pasted_length) pasted_input[--pasted_length] = 0; }
+                    else if (pasted_length + 1 < sizeof(pasted_input)) {
+                        pasted_input[pasted_length++] = key;
+                        pasted_input[pasted_length] = 0;
+                        pasted_at = now;
+                    } else pasted_length = 0;
+                } else if (key == 27) {
                     struct pollfd arrow = {.fd = STDIN_FILENO, .events = POLLIN};
                     if (poll(&arrow, 1, 25) > 0) {
                         char sequence[2];
@@ -616,18 +681,37 @@ int main(int argc, char **argv) {
                             if (sequence[1] == 'D') player_command(&song, "previous", NULL);
                         }
                     }
-                } else handle_keypress(key, &song);
+                } else {
+                    handle_keypress(key, &song);
+                    if (cfg.keyboard && (key == '[' || key == ']')) next_metadata = 0;
+                }
             }
+        }
+        bool dropped_media = false;
+        if (pasted_length && (pasted_at == 0 || now - pasted_at >= 0.2)) {
+            char path[8192];
+            char error[512];
+            if (!dropped_path(pasted_input, path, sizeof(path))) show_notice("Could not read dropped path");
+            else if (local_open_path(path, error, sizeof(error))) {
+                stop_player_follow();
+                dropped_media = true;
+                atomic_store(&force_redraw, true);
+            } else show_notice(error);
+            pasted_length = 0;
+            pasted_input[0] = 0;
         }
         bool frame_due = now >= last_render_at + 1.0 / target_fps;
         bool visualizer_changed = (inputs[3].revents & (POLLIN | POLLHUP | POLLERR)) || frame_due ? update_cava() : false;
-        if (player_follow_fd < 0 && now >= player_follow_retry_at) {
+        if (!local_is_active() && player_follow_fd < 0 && now >= player_follow_retry_at) {
             if (!start_player_follow()) player_follow_retry_at = now + 5.0;
         }
-        bool metadata_changed = playback_changed || now >= next_metadata;
+        bool local_playback_changed = local_update();
+        bool local_tags_changed = local_metadata_changed();
+        if (!local_is_active() && now >= next_metadata) request_song_refresh();
+        bool metadata_changed = dropped_media || playback_changed || local_playback_changed || local_tags_changed || (local_is_active() && now >= next_metadata);
         if (metadata_changed) {
             Song latest = {0};
-            bool found = get_song(&latest);
+            bool found = local_is_active() ? local_get_song(&latest) : get_song(&latest);
             bool changed = strcmp(song.title, latest.title) || strcmp(song.art_url, latest.art_url);
             bool track_changed = strcmp(song.player, latest.player) || strcmp(song.title, latest.title) || strcmp(song.artist, latest.artist) || strcmp(song.album, latest.album);
             if (found && (strcmp(song.title, latest.title) || strcmp(song.artist, latest.artist) || strcmp(song.album, latest.album))) request_lyrics(&latest);
@@ -644,17 +728,19 @@ int main(int argc, char **argv) {
             if (track_changed) {
                 pthread_mutex_lock(&queue_mutex);
                 queue_generation++;
-                next_track[0] = 0;
+                if (!local_is_active()) next_track[0] = 0;
                 if (!strstr(latest.player, "spotify")) current_playlist[0] = 0;
                 pthread_mutex_unlock(&queue_mutex);
                 next_queue = 0;
             }
             song = latest;
+            if (track_changed && local_is_active()) atomic_store(&force_redraw, true);
             if (changed) request_artwork(song.art_url);
             sync_position = song.position;
             sync_time = now;
-            next_metadata = now + (player_follow_fd >= 0 ? fmax(3.0, cfg.metadata_interval) : cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5);
+            next_metadata = now + fmax(0.2, cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5);
         }
+        if (!local_is_active() && now >= next_metadata) next_metadata = now + fmax(0.2, cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5);
         song.position = sync_position + (!strcasecmp(song.status, "playing") ? now - sync_time : 0.0);
         if (now >= next_queue && cfg.show_next && song.player[0] && strstr(song.player, "spotify")) {
             request_spotify_queue();

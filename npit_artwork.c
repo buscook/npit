@@ -168,6 +168,15 @@ static void *artwork_worker(void *arg) {
     return NULL;
 }
 
+static void artwork_request_failed(const char *url, unsigned long generation) {
+    pthread_mutex_lock(&artwork_mutex);
+    if (generation == artwork_generation) {
+        set_string(current_artwork_url, sizeof(current_artwork_url), url);
+        force_redraw = true;
+    }
+    pthread_mutex_unlock(&artwork_mutex);
+}
+
 void request_artwork(const char *url) {
     pthread_mutex_lock(&artwork_mutex);
     if (!strcmp(url ? url : "", desired_artwork_url)) { pthread_mutex_unlock(&artwork_mutex); return; }
@@ -179,14 +188,14 @@ void request_artwork(const char *url) {
     if (!url || !*url) { pthread_mutex_unlock(&artwork_mutex); force_redraw = true; return; }
     pthread_mutex_unlock(&artwork_mutex);
     ArtworkRequest *request = malloc(sizeof(*request));
-    if (!request) return;
+    if (!request) { artwork_request_failed(url, generation); return; }
     set_string(request->url, sizeof(request->url), url);
     request->generation = generation;
     request->preload = false;
     pthread_t thread;
-    if (!reserve_worker()) { free(request); return; }
+    if (!reserve_worker()) { artwork_request_failed(url, generation); free(request); return; }
     if (pthread_create(&thread, NULL, artwork_worker, request) == 0) pthread_detach(thread);
-    else { release_worker(); free(request); }
+    else { artwork_request_failed(url, generation); release_worker(); free(request); }
 }
 
 void preload_artwork(const char *url) {
@@ -245,4 +254,3 @@ static void update_cover_color(const Image *image) {
         cover_b = cover_b + add > 255 ? 255 : cover_b + add;
     }
 }
-

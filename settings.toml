@@ -1,6 +1,6 @@
 [appearance]
 preset = "default"
-scroll_speed = 3.0
+scroll_speed = 2.5
 terminal_font = ""
 terminal_font_size = 0
 
@@ -26,14 +26,16 @@ source = true
 playlist = true
 
 [behavior]
+# Seconds between backup metadata checks; player changes update as soon as they are reported.
+# Slow player responses run in the background and do not pause the display.
 metadata_interval = 0.5
 spotify_interval = 1.0
 player = ""
 
 [lyrics]
 enabled = true
-smooth_scroll = false
-transition_fps = 20
+smooth_scroll = true
+transition_fps = 60
 transition_duration = 0.3
 lines = 3
 offset = 0.0
@@ -54,4 +56,4 @@ characters = " .,:;irsXA253hMHGS#9B&@"
 theme = "cover"
 
 [controls]
-enabled = false
+enabled = true

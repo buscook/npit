@@ -1,5 +1,15 @@
 #include "npit_internal.h"
 
+static pthread_t metadata_thread;
+static pthread_mutex_t metadata_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t metadata_condition = PTHREAD_COND_INITIALIZER;
+static Song metadata_snapshot;
+static double metadata_snapshot_at;
+static bool metadata_snapshot_found;
+static bool metadata_thread_started;
+static bool metadata_stop;
+static bool metadata_requested;
+
 char *capture(char *const argv[]) {
     int pipes[2];
     if (pipe(pipes) != 0) return NULL;
@@ -272,7 +282,7 @@ static int get_song_dbus(Song *song) {
     return 1;
 }
 
-bool get_song(Song *song) {
+static bool fetch_song(Song *song) {
     double started_at = profile_enabled ? monotonic_seconds() : 0.0;
     memset(song, 0, sizeof(*song));
     int result = get_song_dbus(song);
@@ -286,6 +296,46 @@ bool get_song(Song *song) {
     }
     record_timing(&metadata_timing, started_at);
     return found;
+}
+
+bool get_song(Song *song) {
+    if (!metadata_thread_started) return fetch_song(song);
+    pthread_mutex_lock(&metadata_mutex);
+    *song = metadata_snapshot;
+    bool found = metadata_snapshot_found;
+    double elapsed = monotonic_seconds() - metadata_snapshot_at;
+    pthread_mutex_unlock(&metadata_mutex);
+    if (found && !strcasecmp(song->status, "playing") && elapsed > 0) song->position += elapsed;
+    return found;
+}
+
+void request_song_refresh(void) {
+    pthread_mutex_lock(&metadata_mutex);
+    metadata_requested = true;
+    pthread_cond_signal(&metadata_condition);
+    pthread_mutex_unlock(&metadata_mutex);
+}
+
+static void *metadata_loop(void *userdata) {
+    (void)userdata;
+    for (;;) {
+        pthread_mutex_lock(&metadata_mutex);
+        while (!metadata_requested && !metadata_stop) pthread_cond_wait(&metadata_condition, &metadata_mutex);
+        if (metadata_stop) { pthread_mutex_unlock(&metadata_mutex); break; }
+        metadata_requested = false;
+        pthread_mutex_unlock(&metadata_mutex);
+        Song fresh;
+        bool found = fetch_song(&fresh);
+        double received_at = monotonic_seconds();
+        pthread_mutex_lock(&metadata_mutex);
+        metadata_snapshot = fresh;
+        metadata_snapshot_found = found;
+        metadata_snapshot_at = received_at;
+        pthread_mutex_unlock(&metadata_mutex);
+        uint64_t event = 1;
+        if (player_follow_fd >= 0) (void)write(player_follow_fd, &event, sizeof(event));
+    }
+    return NULL;
 }
 
 static void player_signal(GDBusConnection *connection, const gchar *sender, const gchar *path, const gchar *interface, const gchar *signal, GVariant *parameters, gpointer userdata) {
@@ -302,8 +352,7 @@ static void player_signal(GDBusConnection *connection, const gchar *sender, cons
         g_variant_get_child(parameters, 0, "&s", &changed_interface);
         if (strcmp(changed_interface, "org.mpris.MediaPlayer2.Player")) return;
     }
-    uint64_t event = 1;
-    if (player_follow_fd >= 0) (void)write(player_follow_fd, &event, sizeof(event));
+    request_song_refresh();
 }
 
 static void *player_signal_loop(void *userdata) {
@@ -326,6 +375,14 @@ static gboolean quit_player_signal_loop(gpointer userdata) {
 }
 
 void stop_player_follow(void) {
+    if (metadata_thread_started) {
+        pthread_mutex_lock(&metadata_mutex);
+        metadata_stop = true;
+        pthread_cond_signal(&metadata_condition);
+        pthread_mutex_unlock(&metadata_mutex);
+        pthread_join(metadata_thread, NULL);
+        metadata_thread_started = false;
+    }
     if (player_follow_started) {
         GSource *quit = g_idle_source_new();
         g_source_set_callback(quit, quit_player_signal_loop, player_follow_loop, NULL);
@@ -340,10 +397,19 @@ void stop_player_follow(void) {
 }
 
 bool start_player_follow(void) {
-    if (player_follow_started) return true;
-    if (!mpris_bus) return false;
+    if (metadata_thread_started) return true;
     player_follow_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (player_follow_fd < 0) return false;
+    pthread_mutex_lock(&metadata_mutex);
+    metadata_stop = false;
+    metadata_requested = true;
+    pthread_mutex_unlock(&metadata_mutex);
+    if (pthread_create(&metadata_thread, NULL, metadata_loop, NULL) != 0) {
+        stop_player_follow();
+        return false;
+    }
+    metadata_thread_started = true;
+    if (!mpris_bus) return true;
     player_follow_context = g_main_context_new();
     if (!player_follow_context) { stop_player_follow(); return false; }
     player_follow_loop = g_main_loop_new(player_follow_context, FALSE);
@@ -391,9 +457,14 @@ static void set_player_property(const char *bus_name, const char *property, GVar
 }
 
 void player_command(const Song *song, const char *action, const char *value) {
+    if (local_is_active()) { local_command(action, value); return; }
     if (!song->player[0]) return;
     if (!mpris_bus) {
         const char *fallback_value = value;
+        if (!strcmp(action, "seek")) {
+            player_command_fallback(song, "position", value && !strcmp(value, "back") ? "5-" : "5+");
+            return;
+        }
         if (!strcmp(action, "volume")) fallback_value = value && !strcmp(value, "up") ? "0.05+" : "0.05-";
         player_command_fallback(song, action, fallback_value);
         return;
@@ -403,6 +474,10 @@ void player_command(const Song *song, const char *action, const char *value) {
     const char *method = !strcmp(action, "play-pause") ? "PlayPause" : !strcmp(action, "next") ? "Next" : !strcmp(action, "previous") ? "Previous" : NULL;
     if (method) {
         GVariant *reply = g_dbus_connection_call_sync(mpris_bus, bus_name, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", method, NULL, G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL, NULL);
+        if (reply) g_variant_unref(reply);
+    } else if (!strcmp(action, "seek")) {
+        gint64 offset = value && !strcmp(value, "back") ? -5000000 : 5000000;
+        GVariant *reply = g_dbus_connection_call_sync(mpris_bus, bus_name, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Seek", g_variant_new("(x)", offset), G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL, NULL);
         if (reply) g_variant_unref(reply);
     } else if (!strcmp(action, "shuffle")) {
         GVariant *current = player_property(bus_name, "Shuffle");
@@ -432,4 +507,3 @@ void player_command(const Song *song, const char *action, const char *value) {
         }
     }
 }
-

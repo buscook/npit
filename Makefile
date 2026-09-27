@@ -4,13 +4,16 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share/npit
 CFLAGS ?= -O2
-CPPFLAGS += $(shell $(PKG_CONFIG) --cflags libcurl json-c libpng libjpeg openssl pangocairo fontconfig gio-2.0) -DNPIT_DATADIR='"$(DATADIR)"'
-LDLIBS += $(shell $(PKG_CONFIG) --libs libcurl json-c libpng libjpeg openssl pangocairo fontconfig gio-2.0) -lm -pthread
-OBJECTS = npit.o npit_mpris.o npit_http.o npit_lyrics.o npit_artwork.o npit_display.o npit_spotify.o
+CPPFLAGS += $(shell $(PKG_CONFIG) --cflags libcurl json-c libpng libjpeg openssl pangocairo fontconfig gio-2.0 libvlc) -DNPIT_DATADIR='"$(DATADIR)"'
+LDLIBS += $(shell $(PKG_CONFIG) --libs libcurl json-c libpng libjpeg openssl pangocairo fontconfig gio-2.0 libvlc) -lm -pthread
+OBJECTS = npit.o npit_mpris.o npit_http.o npit_lyrics.o npit_artwork.o npit_display.o npit_spotify.o npit_local.o
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall test
 
 all: npit
+
+test: npit
+	python3 -m unittest discover -s tests -v
 
 npit: $(OBJECTS)
 	$(CC) $(OBJECTS) $(LDFLAGS) $(LDLIBS) -o $@

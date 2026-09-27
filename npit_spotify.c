@@ -341,4 +341,3 @@ void request_spotify_queue(void) {
     pthread_cond_signal(&queue_condition);
     pthread_mutex_unlock(&queue_mutex);
 }
-

@@ -174,4 +174,3 @@ double next_lyric_delay(double position) {
     pthread_mutex_unlock(&lyric_mutex);
     return delay;
 }
-

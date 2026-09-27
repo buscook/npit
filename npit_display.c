@@ -716,7 +716,15 @@ static void format_time(double value, char *result, size_t result_size) {
     snprintf(result, result_size, "%d:%02d", (int)value / 60, (int)value % 60);
 }
 
-static void draw_art(const Song *song, const Image *image, int x, int y, int width, int height, int base_r, int base_g, int base_b) {
+typedef struct {
+    char glyph;
+    unsigned char red, green, blue;
+} VideoCell;
+
+static void draw_art(const Song *song, const Image *image, int x, int y, int width, int height, int base_r, int base_g, int base_b, bool force) {
+    static VideoCell *previous;
+    static int previous_x, previous_y, previous_width, previous_height;
+    static bool previous_valid;
     (void)song;
     if (!image->pixels || !strcmp(cfg.art_mode, "none")) {
         move_to(x, y);
@@ -727,29 +735,154 @@ static void draw_art(const Song *song, const Image *image, int x, int y, int wid
     }
     const char *chars = !strcmp(cfg.art_mode, "blocks") ? " .oO#@" : cfg.characters[0] ? cfg.characters : " .,:;irsXA253hMHGS#9B&@";
     size_t chars_len = strlen(chars);
-    for (int row = 0; row < height; row++) {
-        move_to(x, y + row);
-        for (int col = 0; col < width; col++) {
-            int sx = (int)((double)col / width * image->width);
-            int sy = (int)((double)row / height * image->height);
-            if (sx >= image->width) sx = image->width - 1;
-            if (sy >= image->height) sy = image->height - 1;
-            size_t at = ((size_t)sy * (size_t)image->width + (size_t)sx) * 3;
-            int r = image->pixels[at], g = image->pixels[at + 1], b = image->pixels[at + 2];
-            int bright = (int)(0.2126 * r + 0.7152 * g + 0.0722 * b);
-            size_t ci = (size_t)bright * (chars_len - 1) / 255;
-            if (!strcmp(cfg.art_mode, "monochrome")) r=base_r,g=base_g,b=base_b;
-            rgb(r, g, b);
-            putchar(chars[ci]);
+    int draw_width = width, draw_height = height;
+    int x_offset = 0, y_offset = 0;
+    if (local_has_video()) {
+        double aspect = (double)image->width / image->height;
+        draw_height = (int)round(width / (2.0 * aspect));
+        if (draw_height > height) {
+            draw_height = height;
+            draw_width = (int)round(height * 2.0 * aspect);
         }
+        if (draw_width > width) draw_width = width;
+        if (draw_height < 1) draw_height = 1;
+        if (draw_width < 1) draw_width = 1;
+        x_offset = (width - draw_width) / 2;
+        y_offset = (height - draw_height) / 2;
+    }
+    bool incremental = local_has_video();
+    bool compare = incremental && previous_valid && !force && x == previous_x && y == previous_y && width == previous_width && height == previous_height;
+    if (incremental && (!previous || width != previous_width || height != previous_height)) {
+        VideoCell *resized = realloc(previous, (size_t)width * (size_t)height * sizeof(*previous));
+        if (resized) previous = resized;
+        else { free(previous); previous = NULL; compare = false; }
+    }
+    for (int row = 0; row < height; row++) {
+        bool active = false;
+        bool printed = false;
+        int last_r = -1, last_g = -1, last_b = -1;
+        for (int col = 0; col < width; col++) {
+            VideoCell cell = {0};
+            if (col < x_offset || col >= x_offset + draw_width || row < y_offset || row >= y_offset + draw_height) {
+                cell.glyph = ' ';
+            } else {
+                int sx = (int)((double)(col - x_offset) / draw_width * image->width);
+                int sy = (int)((double)(row - y_offset) / draw_height * image->height);
+                if (sx >= image->width) sx = image->width - 1;
+                if (sy >= image->height) sy = image->height - 1;
+                size_t at = ((size_t)sy * (size_t)image->width + (size_t)sx) * 3;
+                int red = image->pixels[at], green = image->pixels[at + 1], blue = image->pixels[at + 2];
+                int bright = (int)(0.2126 * red + 0.7152 * green + 0.0722 * blue);
+                cell.glyph = chars[(size_t)bright * (chars_len - 1) / 255];
+                if (!strcmp(cfg.art_mode, "monochrome")) red = base_r, green = base_g, blue = base_b;
+                cell.red = (unsigned char)red;
+                cell.green = (unsigned char)green;
+                cell.blue = (unsigned char)blue;
+            }
+            size_t index = (size_t)row * (size_t)width + (size_t)col;
+            if (compare && !memcmp(&previous[index], &cell, sizeof(cell))) { active = false; continue; }
+            if (!active) { move_to(x + col, y + row); active = true; last_r = last_g = last_b = -1; }
+            if (cell.glyph != ' ' && (last_r != cell.red || last_g != cell.green || last_b != cell.blue)) {
+                rgb(cell.red, cell.green, cell.blue);
+                last_r = cell.red; last_g = cell.green; last_b = cell.blue;
+            }
+            putchar(cell.glyph);
+            printed = true;
+            if (previous && incremental) previous[index] = cell;
+            frame_changed = true;
+        }
+        if (printed) reset_color();
+    }
+    if (incremental) {
+        previous_x = x; previous_y = y; previous_width = width; previous_height = height;
+        previous_valid = previous != NULL;
+    } else previous_valid = false;
+}
+
+static bool draw_notice(int rows, int cols, double now, bool force) {
+    static char previous[MAX_FIELD];
+    static int previous_row = -1;
+    const char *message = now < ui_notice_until ? ui_notice : "";
+    int row = rows - 1;
+    if (!force && row == previous_row && !strcmp(previous, message)) return false;
+    if (previous_row >= 0 && previous_row < rows && previous_row != row) {
+        move_to(0, previous_row);
+        fputs("\033[0K", stdout);
+    }
+    move_to(0, row);
+    fputs("\033[0K", stdout);
+    if (message[0] && cols > 2) {
+        move_to(1, row);
+        rgb(255, 145, 115);
+        print_fit(message, cols - 2);
         reset_color();
     }
+    set_string(previous, sizeof(previous), message);
+    previous_row = row;
+    frame_changed = true;
+    return true;
 }
 
 void render(const Song *song, double now) {
     frame_changed = false;
     int rows, cols;
     get_terminal_size(&rows, &cols);
+    static int placeholder_screen = 0;
+    static bool first_media_ready = false;
+    static double first_media_seen_at = 0.0;
+    bool local_loading = local_is_loading();
+    bool no_media = (!song->player[0] || !song->title[0] || !strcasecmp(song->status, "stopped")) && !local_loading;
+    bool loading = local_loading;
+    if (!no_media) {
+        if (!first_media_ready) {
+            if (first_media_seen_at == 0.0) first_media_seen_at = now;
+            if (now - first_media_seen_at < 0.5) loading = true;
+            else first_media_ready = true;
+        }
+        if (rows >= 18 && cols >= 66 && !cfg.minimal && strcmp(cfg.art_mode, "none") && song->art_url[0]) {
+            pthread_mutex_lock(&artwork_mutex);
+            if (strcmp(current_artwork_url, song->art_url)) loading = true;
+            pthread_mutex_unlock(&artwork_mutex);
+        }
+    }
+    int placeholder = loading ? 2 : no_media ? 1 : 0;
+    if (placeholder) {
+        bool redraw_placeholder = placeholder != placeholder_screen || rows != previous_rows || cols != previous_cols;
+        atomic_store(&force_redraw, false);
+        if (redraw_placeholder) {
+            if (synchronized_updates_supported) fputs("\033[?2026h", stdout);
+            kitty_delete_marquee(&title_marquee);
+            kitty_delete_marquee(&album_marquee);
+            kitty_delete_marquee(&playlist_marquee);
+            kitty_delete_marquee(&next_marquee);
+            title_marquee.active = false;
+            album_marquee.active = false;
+            playlist_marquee.active = false;
+            next_marquee.active = false;
+            fputs("\033[2J", stdout);
+            reset_detail_rows();
+            previous_rows = rows;
+            previous_cols = cols;
+            previous_art_url[0] = 0;
+            if (no_media) {
+                const char *message = cols >= 16 ? "no media playing" : cols >= 8 ? "no media" : "idle";
+                int width = (int)strlen(message);
+                if (cols >= width) {
+                    move_to((cols - width) / 2, (rows - 1) / 2);
+                    fputs(message, stdout);
+                }
+            }
+            if (synchronized_updates_supported) fputs("\033[?2026l", stdout);
+            fflush(stdout);
+        }
+        if (draw_notice(rows, cols, now, redraw_placeholder)) fflush(stdout);
+        placeholder_screen = placeholder;
+        return;
+    }
+    if (placeholder_screen) {
+        placeholder_screen = 0;
+        atomic_store(&force_redraw, true);
+    }
     bool synchronized = synchronized_updates_supported;
     if (synchronized) fputs("\033[?2026h", stdout);
     title_marquee.active = false;
@@ -787,6 +920,15 @@ void render(const Song *song, double now) {
         if (art_w < 8) art_w = 8;
         art_h = art_w / 2;
     }
+    if (!tiny && local_has_video() && !cfg.minimal && strcmp(cfg.art_mode, "none")) {
+        panel_w = cols >= 100 ? 36 : 28;
+        int available_width = cols - panel_w - 5;
+        int ideal_width = (int)round((rows - 4) * 3.5);
+        art_w = available_width < ideal_width ? available_width : ideal_width;
+        if (art_w < 8) art_w = 8;
+        art_h = (int)round(art_w / 3.5);
+        if (art_h < 1) art_h = 1;
+    }
     if (art_h > rows - 4) art_h = rows - 4;
     int group_w = art_w ? art_w + 3 + panel_w : panel_w;
     if (group_w > cols - 1) group_w = cols - 1;
@@ -797,10 +939,26 @@ void render(const Song *song, double now) {
     if (panel_w < 8) panel_w = 8;
     int text_w = cols - details_x - 1;
     if (text_w < 8) text_w = 8;
+    static unsigned long shown_video_generation;
+    if (redraw_art || !local_has_video()) shown_video_generation = 0;
     pthread_mutex_lock(&artwork_mutex);
     int r, g, b;
     color_for(song, left, top, &r, &g, &b);
-    if (redraw_art && !tiny && !cfg.minimal && strcmp(cfg.art_mode, "none")) draw_art(song, &current_artwork, left, top, art_w, art_h, r, g, b);
+    if (local_has_video()) {
+        if (!strcmp(cfg.theme, "cover")) {
+            if (!local_video_color(&r, &g, &b)) r = g = b = 190;
+        }
+        Image frame = {0};
+        if (local_copy_video(&frame, &shown_video_generation)) {
+            if (!tiny && !cfg.minimal && strcmp(cfg.art_mode, "none")) {
+                draw_art(song, &frame, left, top, art_w, art_h, r, g, b, redraw_art);
+            }
+            free(frame.pixels);
+        }
+    }
+    if (!tiny && !cfg.minimal && strcmp(cfg.art_mode, "none")) {
+        if (!local_has_video() && redraw_art) draw_art(song, &current_artwork, left, top, art_w, art_h, r, g, b, true);
+    }
     pthread_mutex_unlock(&artwork_mutex);
     char text[MAX_FIELD];
     char queued_track[MAX_FIELD];
@@ -963,6 +1121,7 @@ void render(const Song *song, double now) {
     pthread_mutex_unlock(&lyric_mutex);
     if (!next_visible) kitty_delete_marquee(&next_marquee);
     finish_detail_rows();
+    draw_notice(rows, cols, now, redraw_art);
     if (frame_changed) move_to(0, rows - 1);
     if (synchronized) fputs("\033[?2026l", stdout);
     fflush(stdout);

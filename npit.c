@@ -717,9 +717,8 @@ int main(int argc, char **argv) {
         if (metadata_changed) {
             Song latest = {0};
             bool found = local_is_active() ? local_get_song(&latest) : get_song(&latest);
-            bool changed = strcmp(song.title, latest.title) || strcmp(song.art_url, latest.art_url);
             bool track_changed = strcmp(song.player, latest.player) || strcmp(song.title, latest.title) || strcmp(song.artist, latest.artist) || strcmp(song.album, latest.album);
-            if (found && (strcmp(song.title, latest.title) || strcmp(song.artist, latest.artist) || strcmp(song.album, latest.album))) request_lyrics(&latest);
+            if (found) request_lyrics(&latest);
             if (!found && song.player[0]) {
                 pthread_mutex_lock(&lyric_mutex);
                 lyric_request_generation++;
@@ -740,7 +739,7 @@ int main(int argc, char **argv) {
             }
             song = latest;
             if (track_changed && local_is_active()) atomic_store(&force_redraw, true);
-            if (changed) request_artwork(song.art_url);
+            request_artwork(song.art_url);
             sync_position = song.position;
             sync_time = now;
             next_metadata = now + fmax(0.2, cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5);

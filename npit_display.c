@@ -937,7 +937,7 @@ void render(const Song *song, double now) {
     int details_x = art_w ? left + art_w + 3 : (tiny ? 1 : left);
     if (tiny) panel_w = cols - details_x - 1;
     if (panel_w < 8) panel_w = 8;
-    int text_w = cols - details_x - 1;
+    int text_w = panel_w;
     if (text_w < 8) text_w = 8;
     static unsigned long shown_video_generation;
     if (redraw_art || !local_has_video()) shown_video_generation = 0;

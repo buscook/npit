@@ -1,5 +1,12 @@
 #include "npit_internal.h"
 
+static double lyric_retry_at;
+static int lyric_attempts;
+
+static void lyrics_identity(const Song *song, char *identity, size_t size) {
+    snprintf(identity, size, "%.450s\x1f%.450s\x1f%.450s\x1f%.450s\x1f%d", song->title, song->artist, song->album, song->media_url, (int)round(song->length));
+}
+
 void clear_lyrics(void) {
     for (int i = 0; i < lyric_count; i++) free(lyrics[i].text);
     lyric_count = 0;
@@ -108,7 +115,7 @@ static void *lyrics_worker(void *arg) {
     pthread_mutex_lock(&lyric_mutex);
     char identity[MAX_FIELD];
     bool updated = false;
-    snprintf(identity, sizeof(identity), "%.680s\x1f%.680s\x1f%.680s", song.title, song.artist, song.album);
+    lyrics_identity(&song, identity, sizeof(identity));
     if (request.generation == lyric_request_generation && !strcmp(lyric_identity, identity)) {
         clear_lyrics();
         lyric_count = batch.count;
@@ -118,6 +125,7 @@ static void *lyrics_worker(void *arg) {
         }
         lyrics_loaded = true;
         lyrics_pending = false;
+        lyric_retry_at = monotonic_seconds() + 5.0;
         updated = true;
     }
     pthread_mutex_unlock(&lyric_mutex);
@@ -132,14 +140,17 @@ static void *lyrics_worker(void *arg) {
 }
 
 void request_lyrics(const Song *song) {
-    if (!cfg.lyrics || !song->title[0]) return;
+    if (!cfg.lyrics || !song->player[0] || !song->title[0] || song->length <= 0) return;
     char identity[MAX_FIELD];
-    snprintf(identity, sizeof(identity), "%.680s\x1f%.680s\x1f%.680s", song->title, song->artist, song->album);
+    lyrics_identity(song, identity, sizeof(identity));
     LyricRequest *copy = malloc(sizeof(*copy));
     if (!copy) return;
     copy->song = *song;
     pthread_mutex_lock(&lyric_mutex);
-    if (!strcmp(lyric_identity, identity)) { pthread_mutex_unlock(&lyric_mutex); free(copy); return; }
+    bool same = !strcmp(lyric_identity, identity);
+    if (same && (lyrics_pending || lyric_count || lyric_attempts >= 3 || monotonic_seconds() < lyric_retry_at)) { pthread_mutex_unlock(&lyric_mutex); free(copy); return; }
+    if (!same) lyric_attempts = 0;
+    lyric_attempts++;
     set_string(lyric_identity, sizeof(lyric_identity), identity);
     copy->generation = ++lyric_request_generation;
     clear_lyrics();
@@ -147,16 +158,16 @@ void request_lyrics(const Song *song) {
     lyrics_loaded = false;
     pthread_mutex_unlock(&lyric_mutex);
     pthread_t thread;
-    if (!reserve_worker()) { free(copy); return; }
-    if (pthread_create(&thread, NULL, lyrics_worker, copy) == 0) pthread_detach(thread);
+    bool reserved = reserve_worker();
+    if (reserved && pthread_create(&thread, NULL, lyrics_worker, copy) == 0) pthread_detach(thread);
     else {
-        release_worker();
+        if (reserved) release_worker();
         unsigned long generation = copy->generation;
         free(copy);
         pthread_mutex_lock(&lyric_mutex);
         if (generation == lyric_request_generation && !strcmp(lyric_identity, identity)) {
-            lyric_identity[0] = 0;
             lyrics_pending = false;
+            lyric_retry_at = monotonic_seconds() + 5.0;
         }
         pthread_mutex_unlock(&lyric_mutex);
     }

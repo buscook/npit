@@ -1,5 +1,9 @@
 #include "npit_internal.h"
 
+static bool artwork_pending;
+static double artwork_retry_at;
+static int artwork_attempts;
+
 static bool decode_png(const unsigned char *data, size_t length, Image *image) {
     png_image png;
     memset(&png, 0, sizeof(png));
@@ -38,6 +42,8 @@ static bool decode_jpeg(const unsigned char *data, size_t length, Image *image) 
     error.base.error_exit = jpeg_fail;
     if (setjmp(error.jump)) {
         jpeg_destroy_decompress(&jpeg);
+        free(image->pixels);
+        memset(image, 0, sizeof(*image));
         return false;
     }
     jpeg_create_decompress(&jpeg);
@@ -59,8 +65,10 @@ static bool decode_jpeg(const unsigned char *data, size_t length, Image *image) 
         jpeg_read_scanlines(&jpeg, &row, 1);
     }
     jpeg_finish_decompress(&jpeg);
+    bool complete = error.base.num_warnings == 0;
     jpeg_destroy_decompress(&jpeg);
-    return true;
+    if (!complete) { free(image->pixels); memset(image, 0, sizeof(*image)); }
+    return complete;
 }
 
 static bool decode_image(const unsigned char *data, size_t length, Image *image) {
@@ -154,6 +162,8 @@ static void *artwork_worker(void *arg) {
             if (!image.pixels) preload_retry_at = monotonic_seconds() + 10.0;
         }
     } else if (request->generation == artwork_generation) {
+        artwork_pending = false;
+        artwork_retry_at = monotonic_seconds() + 5.0;
         free_image(&current_artwork);
         current_artwork = image;
         memset(&image, 0, sizeof(image));
@@ -171,6 +181,8 @@ static void *artwork_worker(void *arg) {
 static void artwork_request_failed(const char *url, unsigned long generation) {
     pthread_mutex_lock(&artwork_mutex);
     if (generation == artwork_generation) {
+        artwork_pending = false;
+        artwork_retry_at = monotonic_seconds() + 5.0;
         set_string(current_artwork_url, sizeof(current_artwork_url), url);
         force_redraw = true;
     }
@@ -179,13 +191,17 @@ static void artwork_request_failed(const char *url, unsigned long generation) {
 
 void request_artwork(const char *url) {
     pthread_mutex_lock(&artwork_mutex);
-    if (!strcmp(url ? url : "", desired_artwork_url)) { pthread_mutex_unlock(&artwork_mutex); return; }
+    bool same = !strcmp(url ? url : "", desired_artwork_url);
+    if (same && (!url || !*url || artwork_pending || current_artwork.pixels || artwork_attempts >= 3 || monotonic_seconds() < artwork_retry_at)) { pthread_mutex_unlock(&artwork_mutex); return; }
+    if (!same) artwork_attempts = 0;
+    artwork_attempts++;
     set_string(desired_artwork_url, sizeof(desired_artwork_url), url ? url : "");
     artwork_generation++;
     unsigned long generation = artwork_generation;
     free_image(&current_artwork);
     current_artwork_url[0] = 0;
     if (!url || !*url) { pthread_mutex_unlock(&artwork_mutex); force_redraw = true; return; }
+    artwork_pending = true;
     pthread_mutex_unlock(&artwork_mutex);
     ArtworkRequest *request = malloc(sizeof(*request));
     if (!request) { artwork_request_failed(url, generation); return; }

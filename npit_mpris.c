@@ -9,6 +9,60 @@ static bool metadata_snapshot_found;
 static bool metadata_thread_started;
 static bool metadata_stop;
 static bool metadata_requested;
+static pthread_mutex_t properties_mutex = PTHREAD_MUTEX_INITIALIZER;
+static GHashTable *properties_cache;
+static GVariant *player_names;
+static double player_names_at;
+static atomic_bool player_names_dirty = true;
+static atomic_ulong properties_generation;
+
+typedef struct {
+    GVariant *properties;
+    char *owner;
+    double fetched_at;
+} PlayerProperties;
+
+static void free_player_properties(gpointer value) {
+    PlayerProperties *entry = value;
+    g_variant_unref(entry->properties);
+    g_free(entry->owner);
+    free(entry);
+}
+
+static GVariant *cached_player_properties(const char *name, double lifetime, double *age) {
+    double now = monotonic_seconds();
+    unsigned long generation = atomic_load(&properties_generation);
+    pthread_mutex_lock(&properties_mutex);
+    if (!properties_cache) properties_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_player_properties);
+    PlayerProperties *entry = g_hash_table_lookup(properties_cache, name);
+    if (entry && now - entry->fetched_at < lifetime) {
+        *age = now - entry->fetched_at;
+        GVariant *properties = g_variant_ref(entry->properties);
+        pthread_mutex_unlock(&properties_mutex);
+        return properties;
+    }
+    char *known_owner = entry && entry->owner ? g_strdup(entry->owner) : NULL;
+    pthread_mutex_unlock(&properties_mutex);
+    GVariant *reply = g_dbus_connection_call_sync(mpris_bus, name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "GetAll", g_variant_new("(s)", "org.mpris.MediaPlayer2.Player"), G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL, NULL);
+    if (!reply) { g_free(known_owner); return NULL; }
+    GVariant *properties;
+    g_variant_get(reply, "(@a{sv})", &properties);
+    g_variant_unref(reply);
+    GVariant *owner_reply = known_owner ? NULL : g_dbus_connection_call_sync(mpris_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", name), G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 500, NULL, NULL);
+    PlayerProperties *fresh = calloc(1, sizeof(*fresh));
+    if (fresh) {
+        fresh->properties = g_variant_ref(properties);
+        fresh->fetched_at = atomic_load(&properties_generation) == generation ? now : 0;
+        fresh->owner = known_owner;
+        if (owner_reply) g_variant_get(owner_reply, "(s)", &fresh->owner);
+        pthread_mutex_lock(&properties_mutex);
+        g_hash_table_replace(properties_cache, g_strdup(name), fresh);
+        pthread_mutex_unlock(&properties_mutex);
+    } else g_free(known_owner);
+    if (owner_reply) g_variant_unref(owner_reply);
+    *age = 0;
+    return properties;
+}
 
 char *capture(char *const argv[]) {
     int pipes[2];
@@ -179,18 +233,29 @@ static void read_mpris_field(GVariant *metadata, const char *key, char *target, 
 
 static int get_song_dbus(Song *song) {
     if (!mpris_bus) return -1;
-    GVariant *reply = g_dbus_connection_call_sync(mpris_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 500, NULL, NULL);
-    if (!reply) return -1;
-    GVariant *names = NULL;
-    g_variant_get(reply, "(@as)", &names);
+    double now = monotonic_seconds();
+    bool names_dirty = atomic_exchange(&player_names_dirty, false);
+    if (!player_names || names_dirty || now - player_names_at >= 5.0) {
+        GVariant *reply = g_dbus_connection_call_sync(mpris_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 500, NULL, NULL);
+        if (!reply) return -1;
+        if (player_names) g_variant_unref(player_names);
+        g_variant_get(reply, "(@as)", &player_names);
+        player_names_at = now;
+        g_variant_unref(reply);
+    }
+    GVariant *names = g_variant_ref(player_names);
     GVariantIter iter;
     g_variant_iter_init(&iter, names);
     const gchar *name;
     int best_rank = 99;
+    bool best_has_position = false;
     Song best = {0};
     char best_bus[256] = "";
-    bool best_has_position = false;
     bool saw_player = false;
+    pthread_mutex_lock(&metadata_mutex);
+    char active_player[128];
+    set_string(active_player, sizeof(active_player), metadata_snapshot.player);
+    pthread_mutex_unlock(&metadata_mutex);
     while (g_variant_iter_loop(&iter, "&s", &name)) {
         static const char prefix[] = "org.mpris.MediaPlayer2.";
         if (strncmp(name, prefix, sizeof(prefix) - 1)) continue;
@@ -200,17 +265,20 @@ static int get_song_dbus(Song *song) {
             if (strncasecmp(player, cfg.selected_player, length) || (player[length] && player[length] != '.')) continue;
         }
         saw_player = true;
-        GVariant *properties = g_dbus_connection_call_sync(mpris_bus, name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "GetAll", g_variant_new("(s)", "org.mpris.MediaPlayer2.Player"), G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NONE, 500, NULL, NULL);
-        if (!properties) continue;
-        GVariant *props = NULL;
-        g_variant_get(properties, "(@a{sv})", &props);
+        double properties_age = 0;
+        double lifetime = !strcmp(player, active_player) ? fmax(0.2, cfg.metadata_interval > 0 ? cfg.metadata_interval : 0.5) : 5.0;
+        GVariant *props = cached_player_properties(name, lifetime, &properties_age);
+        if (!props) continue;
         Song candidate = {0};
         set_string(candidate.player, sizeof(candidate.player), player);
         const gchar *status = NULL;
         if (g_variant_lookup(props, "PlaybackStatus", "&s", &status)) set_string(candidate.status, sizeof(candidate.status), status);
         gint64 position = 0;
         bool has_position = g_variant_lookup(props, "Position", "x", &position);
-        if (has_position) candidate.position = (double)position / 1000000.0;
+        if (has_position) {
+            candidate.position = (double)position / 1000000.0;
+            if (!strcasecmp(candidate.status, "playing")) candidate.position += properties_age;
+        }
         gdouble volume = 0.0;
         if (g_variant_lookup(props, "Volume", "d", &volume)) candidate.volume = volume * 100.0;
         GVariant *metadata = g_variant_lookup_value(props, "Metadata", G_VARIANT_TYPE_VARDICT);
@@ -243,19 +311,17 @@ static int get_song_dbus(Song *song) {
             g_variant_unref(metadata);
         }
         g_variant_unref(props);
-        g_variant_unref(properties);
         int status_rank = !strcasecmp(candidate.status, "playing") ? 0 : !strcasecmp(candidate.status, "paused") ? 1 : !strcasecmp(candidate.status, "stopped") ? 2 : 3;
         int rank = status_rank * 2 + (is_browser_player(candidate.player) ? 1 : 0);
         if (rank < best_rank) {
             best = candidate;
             best_rank = rank;
-            best_has_position = has_position;
+            best_has_position = has_position && properties_age == 0;
             set_string(best_bus, sizeof(best_bus), name);
         }
         if (!best_rank) break;
     }
     g_variant_unref(names);
-    g_variant_unref(reply);
     if (best_rank == 99) return saw_player ? -1 : 0;
     *song = best;
     if (!best_has_position) {
@@ -347,10 +413,44 @@ static void player_signal(GDBusConnection *connection, const gchar *sender, cons
         const gchar *name, *old_owner, *new_owner;
         g_variant_get(parameters, "(&s&s&s)", &name, &old_owner, &new_owner);
         if (strncmp(name, "org.mpris.MediaPlayer2.", 23)) return;
+        atomic_fetch_add(&properties_generation, 1);
+        atomic_store(&player_names_dirty, true);
+        pthread_mutex_lock(&properties_mutex);
+        if (properties_cache) g_hash_table_remove(properties_cache, name);
+        pthread_mutex_unlock(&properties_mutex);
     } else if (!strcmp(interface, "org.freedesktop.DBus.Properties")) {
         const gchar *changed_interface;
         g_variant_get_child(parameters, 0, "&s", &changed_interface);
         if (strcmp(changed_interface, "org.mpris.MediaPlayer2.Player")) return;
+        atomic_fetch_add(&properties_generation, 1);
+        GVariant *changed = g_variant_get_child_value(parameters, 1);
+        GVariant *invalidated = g_variant_get_child_value(parameters, 2);
+        pthread_mutex_lock(&properties_mutex);
+        if (properties_cache) {
+            GHashTableIter entries;
+            gpointer value;
+            g_hash_table_iter_init(&entries, properties_cache);
+            while (g_hash_table_iter_next(&entries, NULL, &value)) {
+                PlayerProperties *entry = value;
+                if (!entry->owner || strcmp(entry->owner, sender)) continue;
+                GVariantDict dictionary;
+                g_variant_dict_init(&dictionary, entry->properties);
+                GVariantIter fields;
+                const gchar *key;
+                GVariant *field;
+                g_variant_iter_init(&fields, changed);
+                while (g_variant_iter_next(&fields, "{&sv}", &key, &field)) {
+                    g_variant_dict_insert_value(&dictionary, key, field);
+                    g_variant_unref(field);
+                }
+                if (g_variant_n_children(invalidated)) entry->fetched_at = 0;
+                g_variant_unref(entry->properties);
+                entry->properties = g_variant_ref_sink(g_variant_dict_end(&dictionary));
+            }
+        }
+        pthread_mutex_unlock(&properties_mutex);
+        g_variant_unref(changed);
+        g_variant_unref(invalidated);
     }
     request_song_refresh();
 }
@@ -394,6 +494,11 @@ void stop_player_follow(void) {
     if (player_follow_loop) { g_main_loop_unref(player_follow_loop); player_follow_loop = NULL; }
     if (player_follow_context) { g_main_context_unref(player_follow_context); player_follow_context = NULL; }
     if (player_follow_fd >= 0) { close(player_follow_fd); player_follow_fd = -1; }
+    pthread_mutex_lock(&properties_mutex);
+    if (properties_cache) { g_hash_table_unref(properties_cache); properties_cache = NULL; }
+    pthread_mutex_unlock(&properties_mutex);
+    if (player_names) { g_variant_unref(player_names); player_names = NULL; }
+    atomic_store(&player_names_dirty, true);
 }
 
 bool start_player_follow(void) {

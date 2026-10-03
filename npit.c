@@ -637,7 +637,7 @@ int main(int argc, char **argv) {
         double now = monotonic_seconds();
         bool playing = !strcasecmp(song.status, "playing");
         int target_fps = playing ? 10 : cfg.paused_fps;
-        if (playing && local_has_video() && target_fps < 30) target_fps = 30;
+        if (playing && local_has_video() && !cfg.minimal && strcmp(cfg.art_mode, "none") && target_fps < 30) target_fps = 30;
         if (target_fps < 1) target_fps = 1;
         if ((title_marquee.active || album_marquee.active || playlist_marquee.active || next_marquee.active) && target_fps < cfg.fps) target_fps = cfg.fps;
         if (cfg.smooth_scroll && now - lyric_transition_start < cfg.transition_duration && cfg.transition_fps > target_fps) target_fps = cfg.transition_fps;

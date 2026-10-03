@@ -1,6 +1,6 @@
 # NPIT
 
-A lightweight now-playing display for Linux terminals. NPIT shows MPRIS playback or plays a folder of local media, with colorful album art, ASCII video, and optional CAVA visualizer and synced lyrics.
+A lightweight music and video display for your Linux terminal. Follow your media player or play a folder directly, with ASCII artwork and video, an optional CAVA visualizer, and synced lyrics.
 
 ![NPIT showing album art, playback details, and lyrics](assets/screenshot.png)
 
@@ -37,23 +37,54 @@ sudo make install
 npit
 ```
 
-MPV also needs `mpv-mpris` to expose playback to NPIT.
+CAVA is optional. For MPV, install `mpv-mpris` so NPIT can detect it. Other players and browsers need to expose playback through MPRIS; the available metadata and controls depend on the player.
 
 ## Use
 
-Press `q` to quit. Run `npit --help` for options, or `npit --print-config-path` to find your settings file. NPIT creates that file on first run.
+Run `npit` while your media player is playing, or use `npit /path/to/folder` to play local audio and video. You can also drag a file or folder into the terminal while NPIT is running. Dropping an empty or unreadable folder keeps your current song playing.
 
-With `[controls].enabled = true`, press `[` to rewind five seconds and `]` to jump forward five seconds. Arrow keys still change tracks.
+Local files play in the order returned by the folder, which may differ from your file manager's sorted view. Track numbers follow that order. Embedded titles and artist tags take priority over filenames; missing artist tags fall back to the displayed title. Video fills the art area, and the `cover` theme colors playback details using samples from across the video.
 
-Run `npit /path/to/folder` to play audio and video files directly from one folder. NPIT plays them in the order the folder returns them, prefers embedded titles over filenames, and numbers tracks by their position in that order. It does not use filename numbers or media tags to decide playback order. Video appears as moving ASCII in the art area. Folder playback does not require another music player.
+Try `npit --minimal --art-mode none` for a small display, `npit --player spotify` to choose a player, or `npit --no-visualizer` to hide CAVA. Use `npit --help` to see every option.
 
-For local audio, NPIT shows the embedded artist tag when available. Without one, it repeats the displayed title as the artist.
+## Controls
 
-While NPIT is running, drag an audio file, video file, or folder onto its terminal to play it. Video expands into the available space. With the default `cover` theme, playback text uses one color averaged from samples across the whole video; FFmpeg supplies those samples in the background. Dragged paths work as plain paths, shell-escaped paths, or `file://` URLs.
+Set `enabled = true` under `[controls]` in your settings file to enable playback keys. `q`, `Ctrl+C`, and dragging media into the terminal work even when keyboard controls are disabled.
 
-Player metadata loads in the background, and failed folder drops leave the current song playing. Change `[behavior].metadata_interval` in the settings file to adjust the backup refresh rate.
+| Key | Action |
+| --- | --- |
+| `q` or `Ctrl+C` | Quit NPIT. Built-in local playback stops when you quit. |
+| `Space` | Play or pause. |
+| `Right arrow` | Play the next track. |
+| `Left arrow` | Play the previous track. For local files, restart the current track if more than three seconds have played. |
+| `[` | Rewind five seconds. |
+| `]` | Jump forward five seconds. |
+| `+` or `=` | Raise volume by five percentage points. |
+| `-` | Lower volume by five percentage points. |
+| `s` or `S` | Toggle shuffle in an external player that supports it. |
+| `r` or `R` | Toggle repeat. For local files, repeat the folder. |
+| `l` or `L` | Show or hide synced lyrics. |
+| `k` or `K` | Toggle censoring of explicit text. |
+| Drop a file or folder | Start playing the dropped media in NPIT. |
 
-Spotify queue and playlist information are optional. To enable them, create a Spotify Developer app with redirect URI `http://127.0.0.1:8888/callback` and set `SPOTIPY_CLIENT_ID` to its client ID before starting NPIT.
+Playback commands depend on what your external player supports. Keyboard toggles apply to the current session; edit your settings to make them permanent.
+
+## Settings
+
+Your settings file is created on first run. Find it with `npit --print-config-path`, or load a different file with `npit --config /path/to/settings.toml`.
+
+Use `[display]` to choose which information appears, `[artwork]` for the art mode, `[colors]` for the theme, and `[lyrics]` or `[visualizer]` to adjust animations. Set `[performance].safe_render = true` for slower terminals. `[behavior].metadata_interval` controls backup metadata checks; player change notifications update the display immediately when available.
+
+## Spotify queue and playlists
+
+Spotify setup is optional; you can use NPIT without it. To show the next track and playlist, create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), add `http://127.0.0.1:8888/callback` as its redirect URI, and set the app's client ID before starting NPIT:
+
+```sh
+export SPOTIPY_CLIENT_ID="your-client-id"
+npit
+```
+
+In Fish, use `set -gx SPOTIPY_CLIENT_ID "your-client-id"`. When Spotify is playing, NPIT opens your browser to request authorization; approve access and return to the terminal. Access depends on Spotify's current developer-app eligibility and API restrictions.
 
 ## License
 

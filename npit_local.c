@@ -24,6 +24,7 @@ static atomic_bool metadata_pending;
 static pthread_mutex_t video_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char video_staging[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
 static unsigned char video_pixels[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+static unsigned char video_rgb[VIDEO_WIDTH * VIDEO_HEIGHT * 3];
 static unsigned long video_generation;
 static double entry_started_at;
 static double last_position_at;
@@ -108,15 +109,43 @@ static void *scan_video_color(void *data) {
         unsigned char frame[32 * 18 * 3];
         unsigned long long sums[3] = {0};
         unsigned long long count = 0;
-        for (int sample = 0; sample < 16 && atomic_load(&color_generation) == job->generation; sample++) {
-            char position[40];
-            snprintf(position, sizeof(position), "%.3f", duration * (sample + 0.5) / 16.0);
-            char *command[] = {"ffmpeg", "-nostdin", "-v", "error", "-ss", position, "-i", job->path, "-frames:v", "1", "-vf", "scale=32:18", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1", NULL};
-            if (capture_process(command, frame, sizeof(frame)) != sizeof(frame)) continue;
-            for (size_t pixel = 0; pixel < sizeof(frame); pixel += 3) {
-                sums[0] += frame[pixel];
-                sums[1] += frame[pixel + 1];
-                sums[2] += frame[pixel + 2];
+        for (int batch = 0; batch < 4 && atomic_load(&color_generation) == job->generation; batch++) {
+            char positions[4][40];
+            char *command[80];
+            int argument = 0;
+            command[argument++] = "ffmpeg";
+            command[argument++] = "-nostdin";
+            command[argument++] = "-v";
+            command[argument++] = "error";
+            for (int sample = 0; sample < 4; sample++) {
+                snprintf(positions[sample], sizeof(positions[sample]), "%.3f", duration * (batch * 4 + sample + 0.5) / 16.0);
+                command[argument++] = "-ss";
+                command[argument++] = positions[sample];
+                command[argument++] = "-threads";
+                command[argument++] = "1";
+                command[argument++] = "-i";
+                command[argument++] = job->path;
+            }
+            command[argument++] = "-filter_complex_threads";
+            command[argument++] = "1";
+            command[argument++] = "-filter_complex";
+            command[argument++] = "[0:v]scale=32:18,trim=end_frame=1,setpts=PTS-STARTPTS[a];[1:v]scale=32:18,trim=end_frame=1,setpts=PTS-STARTPTS[b];[2:v]scale=32:18,trim=end_frame=1,setpts=PTS-STARTPTS[c];[3:v]scale=32:18,trim=end_frame=1,setpts=PTS-STARTPTS[d];[a][b][c][d]hstack=inputs=4[out]";
+            command[argument++] = "-map";
+            command[argument++] = "[out]";
+            command[argument++] = "-frames:v";
+            command[argument++] = "1";
+            command[argument++] = "-f";
+            command[argument++] = "rawvideo";
+            command[argument++] = "-pix_fmt";
+            command[argument++] = "rgb24";
+            command[argument++] = "pipe:1";
+            command[argument] = NULL;
+            unsigned char samples[sizeof(frame) * 4];
+            if (capture_process(command, samples, sizeof(samples)) != sizeof(samples)) continue;
+            for (size_t pixel = 0; pixel < sizeof(samples); pixel += 3) {
+                sums[0] += samples[pixel];
+                sums[1] += samples[pixel + 1];
+                sums[2] += samples[pixel + 2];
                 count++;
             }
         }
@@ -465,8 +494,7 @@ bool local_copy_video(Image *image, unsigned long *generation) {
     if (!local_has_video()) return false;
     pthread_mutex_lock(&video_mutex);
     if (!video_generation || (generation && *generation == video_generation)) { pthread_mutex_unlock(&video_mutex); return false; }
-    image->pixels = malloc(VIDEO_WIDTH * VIDEO_HEIGHT * 3);
-    if (!image->pixels) { pthread_mutex_unlock(&video_mutex); return false; }
+    image->pixels = video_rgb;
     for (size_t pixel = 0; pixel < VIDEO_WIDTH * VIDEO_HEIGHT; pixel++) {
         image->pixels[pixel * 3] = video_pixels[pixel * 4 + 2];
         image->pixels[pixel * 3 + 1] = video_pixels[pixel * 4 + 1];

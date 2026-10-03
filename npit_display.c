@@ -949,11 +949,8 @@ void render(const Song *song, double now) {
             if (!local_video_color(&r, &g, &b)) r = g = b = 190;
         }
         Image frame = {0};
-        if (local_copy_video(&frame, &shown_video_generation)) {
-            if (!tiny && !cfg.minimal && strcmp(cfg.art_mode, "none")) {
-                draw_art(song, &frame, left, top, art_w, art_h, r, g, b, redraw_art);
-            }
-            free(frame.pixels);
+        if (!tiny && !cfg.minimal && strcmp(cfg.art_mode, "none") && local_copy_video(&frame, &shown_video_generation)) {
+            draw_art(song, &frame, left, top, art_w, art_h, r, g, b, redraw_art);
         }
     }
     if (!tiny && !cfg.minimal && strcmp(cfg.art_mode, "none")) {

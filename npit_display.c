@@ -903,17 +903,43 @@ void render(const Song *song, double now) {
         previous_cols = cols;
         set_string(previous_art_url, sizeof(previous_art_url), song->art_url);
     }
-    if (detail_row_count != rows) {
-        reset_detail_rows();
-        detail_rows = calloc((size_t)rows, sizeof(*detail_rows));
-        if (detail_rows) detail_row_count = rows;
-    }
-    if (detail_rows) for (int i = 0; i < detail_row_count; i++) detail_rows[i].touched = false;
+    char queued_track[MAX_FIELD];
+    char playlist_name[MAX_FIELD];
+    pthread_mutex_lock(&queue_mutex);
+    set_string(queued_track, sizeof(queued_track), next_track);
+    set_string(playlist_name, sizeof(playlist_name), current_playlist);
+    pthread_mutex_unlock(&queue_mutex);
+    const char *playlist_display = song->playlist[0] ? song->playlist : playlist_name;
     bool tiny = rows < 18 || cols < 66;
     int art_h = tiny ? 0 : rows - 4;
     if (art_h < 1) art_h = 1;
     int art_w = tiny || cfg.minimal || !strcmp(cfg.art_mode, "none") ? 0 : (int)(art_h * 2.0);
-    int panel_w = 48;
+    int panel_w = cfg.show_time ? 13 : 1;
+    if (cfg.visualizer && cava_enabled && cfg.bars > panel_w) panel_w = cfg.bars;
+    const char *fields[] = {song->title, song->artist, song->album, playlist_display, queued_track};
+    bool visible[] = {true, true, !tiny && !cfg.minimal && cfg.show_album,
+                      !tiny && !cfg.minimal && cfg.show_playlist,
+                      !tiny && !cfg.minimal && cfg.show_next};
+    int prefixes[] = {0, 0, 0, 10, 6};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
+        if (!visible[i] || !fields[i][0]) continue;
+        char field[MAX_FIELD];
+        set_string(field, sizeof(field), fields[i]);
+        clean_text(field);
+        int width = text_cell_width(field) + prefixes[i];
+        if (width > panel_w) panel_w = width;
+    }
+    if (!tiny && !cfg.minimal) {
+        int width = 0;
+        if (cfg.show_source) width = text_cell_width(song->player) + 8 + (lossless_label(song) ? 11 : 0);
+        if (cfg.show_track && text_cell_width(song->track) + 6 > width) width = text_cell_width(song->track) + 6;
+        if (cfg.show_status && text_cell_width(song->status) + 8 > width) width = text_cell_width(song->status) + 8;
+        if (cfg.show_volume && width < 12) width = 12;
+        if (width > panel_w) panel_w = width;
+    }
+    if (panel_w > 48) panel_w = 48;
+    if (panel_w < 12) panel_w = 12;
+    if (panel_w > cols - 2) panel_w = cols > 2 ? cols - 2 : 1;
     int total = art_w + 3 + panel_w;
     if (!tiny && total > cols - 2) {
         art_w = (cols - panel_w - 5) / 2 * 2;
@@ -921,7 +947,6 @@ void render(const Song *song, double now) {
         art_h = art_w / 2;
     }
     if (!tiny && local_has_video() && !cfg.minimal && strcmp(cfg.art_mode, "none")) {
-        panel_w = cols >= 100 ? 36 : 28;
         int available_width = cols - panel_w - 5;
         int ideal_width = (int)round((rows - 4) * 3.5);
         art_w = available_width < ideal_width ? available_width : ideal_width;
@@ -932,13 +957,30 @@ void render(const Song *song, double now) {
     if (art_h > rows - 4) art_h = rows - 4;
     int group_w = art_w ? art_w + 3 + panel_w : panel_w;
     if (group_w > cols - 1) group_w = cols - 1;
-    int left = tiny ? 0 : (cols - group_w) / 2;
+    int left = (cols - group_w) / 2;
     int top = tiny ? 0 : (rows - art_h) / 2;
-    int details_x = art_w ? left + art_w + 3 : (tiny ? 1 : left);
-    if (tiny) panel_w = cols - details_x - 1;
-    if (panel_w < 8) panel_w = 8;
+    int details_x = art_w ? left + art_w + 3 : left;
     int text_w = panel_w;
-    if (text_w < 8) text_w = 8;
+    static int layout_left = -1, layout_art_w = -1, layout_panel_w = -1;
+    if (left != layout_left || art_w != layout_art_w || panel_w != layout_panel_w) {
+        layout_left = left;
+        layout_art_w = art_w;
+        layout_panel_w = panel_w;
+        redraw_art = true;
+        frame_changed = true;
+        kitty_delete_marquee(&title_marquee);
+        kitty_delete_marquee(&album_marquee);
+        kitty_delete_marquee(&playlist_marquee);
+        kitty_delete_marquee(&next_marquee);
+        fputs("\033[2J", stdout);
+        reset_detail_rows();
+    }
+    if (detail_row_count != rows) {
+        reset_detail_rows();
+        detail_rows = calloc((size_t)rows, sizeof(*detail_rows));
+        if (detail_rows) detail_row_count = rows;
+    }
+    if (detail_rows) for (int i = 0; i < detail_row_count; i++) detail_rows[i].touched = false;
     static unsigned long shown_video_generation;
     if (redraw_art || !local_has_video()) shown_video_generation = 0;
     pthread_mutex_lock(&artwork_mutex);
@@ -958,13 +1000,6 @@ void render(const Song *song, double now) {
     }
     pthread_mutex_unlock(&artwork_mutex);
     char text[MAX_FIELD];
-    char queued_track[MAX_FIELD];
-    char playlist_name[MAX_FIELD];
-    pthread_mutex_lock(&queue_mutex);
-    set_string(queued_track, sizeof(queued_track), next_track);
-    set_string(playlist_name, sizeof(playlist_name), current_playlist);
-    pthread_mutex_unlock(&queue_mutex);
-    const char *playlist_display = song->playlist[0] ? song->playlist : playlist_name;
     bool show_album = !tiny && !cfg.minimal && cfg.show_album && song->album[0];
     bool show_track = !tiny && !cfg.minimal && cfg.show_track && song->track[0];
     bool show_playlist = !tiny && !cfg.minimal && cfg.show_playlist && song->player[0] && playlist_display[0];
@@ -978,7 +1013,11 @@ void render(const Song *song, double now) {
     int detail_height = 3 + show_album + show_track + show_playlist + show_source + show_status + show_volume + show_next;
     detail_height += (cfg.visualizer && cava_enabled) || cfg.show_time;
     detail_height += cfg.show_time;
-    if (show_lyrics) detail_height += cfg.lyric_lines + show_next;
+    int lyric_budget = cfg.lyric_lines + 2;
+    int available_lyrics = rows - 2 - detail_height - show_next;
+    if (lyric_budget > available_lyrics) lyric_budget = available_lyrics;
+    if (lyric_budget < 3) show_lyrics = false;
+    if (show_lyrics) detail_height += lyric_budget + show_next;
     int details_y = art_w ? top + (art_h - detail_height) / 2 : (rows - detail_height) / 2;
     if (details_y < 0) details_y = 0;
     if (details_y + detail_height >= rows) details_y = rows > detail_height + 1 ? rows - detail_height - 1 : 0;
@@ -998,7 +1037,7 @@ void render(const Song *song, double now) {
     } else kitty_delete_marquee(&album_marquee);
     if (!tiny && !cfg.minimal && cfg.show_track && song->track[0]) {
         snprintf(text, sizeof(text), "track %s", song->track);
-        draw_detail_row(text, details_x, details_y + line++, r, g, b, false);
+        draw_static_field(text, text_w, details_x, details_y + line++, r, g, b);
     }
     if (show_playlist) {
         snprintf(text, sizeof(text), "%s", playlist_display);
@@ -1037,24 +1076,24 @@ void render(const Song *song, double now) {
         format_time(song->position, elapsed, sizeof(elapsed));
         format_time(song->length, duration, sizeof(duration));
         snprintf(text, sizeof(text), "%s / %s", elapsed, duration);
-        draw_detail_row(text, details_x, details_y + line++, r, g, b, false);
+        draw_static_field(text, text_w, details_x, details_y + line++, r, g, b);
     }
     if (!tiny && !cfg.minimal && cfg.show_source && song->player[0]) {
         const char *quality = lossless_label(song);
         char player_name[128]; set_string(player_name, sizeof(player_name), song->player); lowercase(player_name);
         snprintf(text, sizeof(text), "source: %s%s%s", player_name, quality ? " • " : "", quality ? quality : "");
-        draw_detail_row(text, details_x, details_y + line++, r, g, b, false);
+        draw_static_field(text, text_w, details_x, details_y + line++, r, g, b);
     }
     if (!tiny && !cfg.minimal && cfg.show_status) {
         char status[64];
         set_string(status, sizeof(status), song->status[0] ? song->status : "stopped");
         lowercase(status);
         snprintf(text, sizeof(text), "status: %s", status);
-        draw_detail_row(text, details_x, details_y + line++, r, g, b, false);
+        draw_static_field(text, text_w, details_x, details_y + line++, r, g, b);
     }
     if (!tiny && !cfg.minimal && cfg.show_volume) {
         snprintf(text, sizeof(text), "volume: %.0f%%", song->volume);
-        draw_detail_row(text, details_x, details_y + line++, r, g, b, false);
+        draw_static_field(text, text_w, details_x, details_y + line++, r, g, b);
     }
     bool next_visible = false;
     if (!tiny && !cfg.minimal && cfg.show_next && song->player[0] && queued_track[0]) {
@@ -1068,10 +1107,9 @@ void render(const Song *song, double now) {
         }
     }
     pthread_mutex_lock(&lyric_mutex);
-    int lyric_space = rows - 1 - (details_y + line);
-    if (next_visible && cfg.lyrics && lyrics_loaded && lyric_count && lyric_space > 1) {
+    int lyric_space = show_lyrics ? lyric_budget : 0;
+    if (next_visible && show_lyrics) {
         line++;
-        lyric_space--;
     }
     if (!tiny && !cfg.minimal && cfg.lyrics && lyrics_loaded && lyric_count && lyric_space > 0) {
         if (wrapped_generation != lyric_generation || wrapped_width != text_w || wrapped_clean != cfg.clean) {
@@ -1090,6 +1128,7 @@ void render(const Song *song, double now) {
         int lyric_b = (int)(b * (0.65 + 0.35 * fade));
         int focus = active < 0 ? 0 : active;
         int lyric_top = details_y + line;
+        int lyric_bottom = lyric_top + lyric_space;
         int anchor_offset = cfg.lyric_lines / 2;
         if (anchor_offset >= lyric_space) anchor_offset = lyric_space - 1;
         int anchor_y = lyric_top + anchor_offset;
@@ -1107,11 +1146,11 @@ void render(const Song *song, double now) {
         int next_y = anchor_y;
         if (prepare_wrapped_lyric(focus, text_w)) {
             int next_count = cfg.lyric_lines - 1 - previous_count;
-            int reserve_next = next_count > 0 && focus + 1 < lyric_count && rows - 1 - next_y > 1 ? 1 : 0;
-            next_y += draw_lyric_segments(wrapped_lyrics[focus].text, text_w, 0, rows - 1 - next_y - reserve_next, details_x - 2, next_y, active >= 0, active >= 0 ? lyric_r : r / 2, active >= 0 ? lyric_g : g / 2, active >= 0 ? lyric_b : b / 2, r, g, b);
-            for (int i = focus + 1, shown = 0; i < lyric_count && shown < next_count && next_y < rows - 1; i++, shown++) {
+            int reserve_next = next_count > 0 && focus + 1 < lyric_count && lyric_bottom - next_y > 1 ? 1 : 0;
+            next_y += draw_lyric_segments(wrapped_lyrics[focus].text, text_w, 0, lyric_bottom - next_y - reserve_next, details_x - 2, next_y, active >= 0, active >= 0 ? lyric_r : r / 2, active >= 0 ? lyric_g : g / 2, active >= 0 ? lyric_b : b / 2, r, g, b);
+            for (int i = focus + 1, shown = 0; i < lyric_count && shown < next_count && next_y < lyric_bottom; i++, shown++) {
                 if (!prepare_wrapped_lyric(i, text_w)) break;
-                next_y += draw_lyric_segments(wrapped_lyrics[i].text, text_w, 0, rows - 1 - next_y, details_x - 2, next_y, false, r / 2, g / 2, b / 2, r, g, b);
+                next_y += draw_lyric_segments(wrapped_lyrics[i].text, text_w, 0, lyric_bottom - next_y, details_x - 2, next_y, false, r / 2, g / 2, b / 2, r, g, b);
             }
         }
     }

@@ -48,6 +48,13 @@
 #ifndef NPIT_DATADIR
 #define NPIT_DATADIR "/usr/local/share/npit"
 #endif
+#ifndef NPIT_PREFIX
+#define NPIT_PREFIX "/usr/local"
+#endif
+#ifndef NPIT_BINDIR
+#define NPIT_BINDIR "/usr/local/bin"
+#endif
+int update_app(void);
 #define MAX_FIELD 2048
 #define MAX_ART 512
 #define MAX_LYRICS 512

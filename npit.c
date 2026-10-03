@@ -491,7 +491,7 @@ static bool update_cava(void) {
 }
 
 static void usage(void) {
-    puts("npit - now playing in terminal\n\nusage: npit [options] [FOLDER]\n\nFOLDER plays audio and video files in the order returned by the folder. Track numbers reflect that order. Video appears as moving ASCII.\n\n  -h, --help                 show this help\n      --version              show version\n      --config PATH          use a settings file\n      --print-config-path    show settings location\n      --diagnose             show runtime dependency status\n      --profile              print timing summary after exit\n      --player NAME          choose an MPRIS player\n      --theme NAME           cover, cyan, green, amber, purple, monochrome, rainbow\n      --art-mode MODE        color, monochrome, blocks, none\n      --preset NAME          default, compact, cinema, minimal\n      --fps NUMBER           visualizer and text scroll FPS, 10-360; 0 detects monitor rate\n      --bars NUMBER          CAVA bar count\n      --sensitivity NUMBER   CAVA input sensitivity\n      --spotify-interval SEC Spotify queue refresh interval\n      --no-visualizer        disable CAVA spectrum\n      --lyrics               enable lyrics\n      --no-lyrics            disable lyrics\n      --clean                censor explicit words\n      --no-clean             show unfiltered text\n      --minimal              show title, artist, spectrum, and time\n      --safe-render          limit redraws for slower terminals\n\nwhen [controls].enabled is true: space=play/pause, arrows=skip, [ and ]=seek 5 seconds, +/-=volume, s=shuffle, r=repeat, l=lyrics, k=clean. q and ctrl+c always quit.");
+    puts("npit - now playing in terminal\n\nusage: npit [options] [FOLDER]\n\nFOLDER plays audio and video files in the order returned by the folder. Track numbers reflect that order. Video appears as moving ASCII.\n\n  -h, --help                 show this help\n      --version              show version\n      --update               build and install the latest GitHub main\n      --config PATH          use a settings file\n      --print-config-path    show settings location\n      --diagnose             show runtime dependency status\n      --profile              print timing summary after exit\n      --player NAME          choose an MPRIS player\n      --theme NAME           cover, cyan, green, amber, purple, monochrome, rainbow\n      --art-mode MODE        color, monochrome, blocks, none\n      --preset NAME          default, compact, cinema, minimal\n      --fps NUMBER           visualizer and text scroll FPS, 10-360; 0 detects monitor rate\n      --bars NUMBER          CAVA bar count\n      --sensitivity NUMBER   CAVA input sensitivity\n      --spotify-interval SEC Spotify queue refresh interval\n      --no-visualizer        disable CAVA spectrum\n      --lyrics               enable lyrics\n      --no-lyrics            disable lyrics\n      --clean                censor explicit words\n      --no-clean             show unfiltered text\n      --minimal              show title, artist, spectrum, and time\n      --safe-render          limit redraws for slower terminals\n\nwhen [controls].enabled is true: space=play/pause, arrows=skip, [ and ]=seek 5 seconds, +/-=volume, s=shuffle, r=repeat, l=lyrics, k=clean. q and ctrl+c always quit.");
 }
 
 static bool dropped_path(const char *input, char *path, size_t size) {
@@ -538,9 +538,10 @@ int main(int argc, char **argv) {
     int cli_fps = -1, cli_lyrics = -1, cli_bars = -1, cli_sensitivity = -1;
     double cli_spotify_interval = -1;
     bool cli_no_visualizer = false, cli_clean = false, cli_no_clean = false, cli_minimal = false, cli_safe = false;
-    bool show_help = false, diagnose = false, print_config_path = false;
+    bool show_help = false, diagnose = false, print_config_path = false, update = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) show_help = true;
+        else if (!strcmp(argv[i], "--update")) update = true;
         else if (!strcmp(argv[i], "--version")) { puts("Now Playing In Terminal " APP_VERSION); return 0; }
         else if (!strcmp(argv[i], "--print-config-path")) print_config_path = true;
         else if (!strcmp(argv[i], "--diagnose")) diagnose = true;
@@ -565,6 +566,10 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unknown option or extra folder: %s\n", argv[i]); return 2; }
     }
     if (show_help) { usage(); return 0; }
+    if (update) {
+        if (argc != 2) { fputs("npit: use --update on its own\n", stderr); return 2; }
+        return update_app();
+    }
     load_config(custom_config);
     if (print_config_path) { puts(config_path); return 0; }
     if (cli_player) set_string(cfg.selected_player, sizeof(cfg.selected_player), cli_player);

@@ -11,20 +11,20 @@ Install dependencies for your distribution family:
 ### Arch-based (Arch, EndeavourOS, CachyOS, Manjaro)
 
 ```sh
-sudo pacman -S base-devel pkgconf curl json-c libpng libjpeg-turbo openssl cairo pango fontconfig glib2 libvlc vlc-plugins-base ffmpeg cava
+sudo pacman -S git base-devel pkgconf curl json-c libpng libjpeg-turbo openssl cairo pango fontconfig glib2 libvlc vlc-plugins-base ffmpeg cava
 ```
 
 ### Debian-based (Debian, Ubuntu, Linux Mint)
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config libcurl4-openssl-dev libjson-c-dev libpng-dev libjpeg-dev libssl-dev libcairo2-dev libpango1.0-dev libfontconfig1-dev libglib2.0-dev libvlc-dev vlc-plugin-base ffmpeg cava
+sudo apt install git build-essential pkg-config libcurl4-openssl-dev libjson-c-dev libpng-dev libjpeg-dev libssl-dev libcairo2-dev libpango1.0-dev libfontconfig1-dev libglib2.0-dev libvlc-dev vlc-plugin-base ffmpeg cava
 ```
 
 ### RPM-based (Fedora)
 
 ```sh
-sudo dnf install gcc make pkgconf-pkg-config libcurl-devel json-c-devel libpng-devel libjpeg-turbo-devel openssl-devel cairo-devel pango-devel fontconfig-devel glib2-devel vlc-devel vlc ffmpeg cava
+sudo dnf install git gcc make pkgconf-pkg-config libcurl-devel json-c-devel libpng-devel libjpeg-turbo-devel openssl-devel cairo-devel pango-devel fontconfig-devel glib2-devel vlc-devel vlc ffmpeg cava
 ```
 
 Then build and install:
@@ -38,6 +38,12 @@ npit
 ```
 
 CAVA is optional. For MPV, install `mpv-mpris` so NPIT can detect it. Other players and browsers need to expose playback through MPRIS; the available metadata and controls depend on the player.
+
+## Update
+
+Run `npit --update` to download the latest GitHub `main`, build it, and replace your installed command. Keep the build dependencies above installed. Run it without `sudo`; it requests your password only if installation needs it.
+
+Your personal settings and Spotify tokens are preserved. A failed download or build leaves the installed app in place. This updates the installed app, not your local Git checkout. Use your package manager instead for installations under `/usr`.
 
 ## Use
 
